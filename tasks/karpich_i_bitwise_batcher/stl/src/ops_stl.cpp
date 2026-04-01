@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "karpich_i_bitwise_batcher/common/include/common.hpp"
-#include "util/include/util.hpp"
 
 namespace karpich_i_bitwise_batcher {
 
@@ -103,54 +102,19 @@ std::vector<std::vector<std::pair<int, int>>> BuildMergeNetwork(int lo, int hi) 
   return levels;
 }
 
-void ApplyComparatorsSeq(std::vector<int> &arr, const std::vector<std::pair<int, int>> &comps) {
-  for (const auto &[a, b] : comps) {
-    if (arr[a] > arr[b]) {
-      std::swap(arr[a], arr[b]);
-    }
-  }
-}
-
-void ApplyComparatorsParallel(std::vector<int> &arr, const std::vector<std::pair<int, int>> &comps, int num_threads) {
-  int total = static_cast<int>(comps.size());
-  std::vector<std::thread> threads(num_threads);
-  int chunk = total / num_threads;
-  int remainder = total % num_threads;
-
-  int start = 0;
-  for (int ti = 0; ti < num_threads; ti++) {
-    int end = start + chunk + (ti < remainder ? 1 : 0);
-    threads[ti] = std::thread([&arr, &comps, start, end]() {
-      for (int i = start; i < end; i++) {
-        if (arr[comps[i].first] > arr[comps[i].second]) {
-          std::swap(arr[comps[i].first], arr[comps[i].second]);
-        }
-      }
-    });
-    start = end;
-  }
-
-  for (auto &th : threads) {
-    th.join();
-  }
-}
-
-void ApplyComparatorNetworkParallel(std::vector<int> &arr, const std::vector<std::vector<std::pair<int, int>>> &levels,
-                                    int num_threads) {
+void ApplyComparatorNetwork(std::vector<int> &arr, const std::vector<std::vector<std::pair<int, int>>> &levels) {
   for (int lvl = static_cast<int>(levels.size()) - 1; lvl >= 0; lvl--) {
-    const auto &comps = levels[lvl];
-    int total = static_cast<int>(comps.size());
-
-    if (total <= 0) {
-      continue;
-    }
-
-    if (num_threads <= 1 || total < num_threads) {
-      ApplyComparatorsSeq(arr, comps);
-    } else {
-      ApplyComparatorsParallel(arr, comps, num_threads);
+    for (const auto &[a, b] : levels[lvl]) {
+      if (arr[a] > arr[b]) {
+        std::swap(arr[a], arr[b]);
+      }
     }
   }
+}
+
+void BatcherMerge(std::vector<int> &arr, int lo, int hi) {
+  auto levels = BuildMergeNetwork(lo, hi);
+  ApplyComparatorNetwork(arr, levels);
 }
 
 }  // namespace
@@ -202,9 +166,7 @@ bool KarpichIBitwiseBatcherSTL::RunImpl() {
   std::ranges::copy(left, data_.begin());
   std::ranges::copy(right, data_.begin() + half);
 
-  int num_threads = ppc::util::GetNumThreads();
-  auto levels = BuildMergeNetwork(0, padded - 1);
-  ApplyComparatorNetworkParallel(data_, levels, num_threads);
+  BatcherMerge(data_, 0, padded - 1);
 
   data_.resize(n);
   return true;
