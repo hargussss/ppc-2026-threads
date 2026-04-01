@@ -190,31 +190,19 @@ bool KarpichIBitwiseBatcherSTL::RunImpl() {
   int max_elem = *std::ranges::max_element(data_);
   data_.resize(padded, max_elem);
 
+  int half = padded / 2;
+  std::vector<int> left(data_.begin(), data_.begin() + half);
+  std::vector<int> right(data_.begin() + half, data_.end());
+
+  std::thread left_thread([&left]() { RadixSort(left); });
+  std::thread right_thread([&right]() { RadixSort(right); });
+  left_thread.join();
+  right_thread.join();
+
+  std::ranges::copy(left, data_.begin());
+  std::ranges::copy(right, data_.begin() + half);
+
   int num_threads = ppc::util::GetNumThreads();
-  int parts = std::min(num_threads, padded);
-  int part_size = padded / parts;
-
-  std::vector<std::vector<int>> chunks(parts);
-  for (int i = 0; i < parts; i++) {
-    int begin_idx = i * part_size;
-    int end_idx = (i == parts - 1) ? padded : (i + 1) * part_size;
-    chunks[i].assign(data_.begin() + begin_idx, data_.begin() + end_idx);
-  }
-
-  std::vector<std::thread> threads(parts);
-  for (int i = 0; i < parts; i++) {
-    threads[i] = std::thread([&chunks, i]() { RadixSort(chunks[i]); });
-  }
-  for (auto &th : threads) {
-    th.join();
-  }
-
-  int offset = 0;
-  for (int i = 0; i < parts; i++) {
-    std::ranges::copy(chunks[i], data_.begin() + offset);
-    offset += static_cast<int>(chunks[i].size());
-  }
-
   auto levels = BuildMergeNetwork(0, padded - 1);
   ApplyComparatorNetworkParallel(data_, levels, num_threads);
 
