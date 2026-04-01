@@ -103,6 +103,38 @@ std::vector<std::vector<std::pair<int, int>>> BuildMergeNetwork(int lo, int hi) 
   return levels;
 }
 
+void ApplyComparatorsSeq(std::vector<int> &arr, const std::vector<std::pair<int, int>> &comps) {
+  for (const auto &[a, b] : comps) {
+    if (arr[a] > arr[b]) {
+      std::swap(arr[a], arr[b]);
+    }
+  }
+}
+
+void ApplyComparatorsParallel(std::vector<int> &arr, const std::vector<std::pair<int, int>> &comps, int num_threads) {
+  int total = static_cast<int>(comps.size());
+  std::vector<std::thread> threads(num_threads);
+  int chunk = total / num_threads;
+  int remainder = total % num_threads;
+
+  int start = 0;
+  for (int ti = 0; ti < num_threads; ti++) {
+    int end = start + chunk + (ti < remainder ? 1 : 0);
+    threads[ti] = std::thread([&arr, &comps, start, end]() {
+      for (int i = start; i < end; i++) {
+        if (arr[comps[i].first] > arr[comps[i].second]) {
+          std::swap(arr[comps[i].first], arr[comps[i].second]);
+        }
+      }
+    });
+    start = end;
+  }
+
+  for (auto &th : threads) {
+    th.join();
+  }
+}
+
 void ApplyComparatorNetworkParallel(std::vector<int> &arr, const std::vector<std::vector<std::pair<int, int>>> &levels,
                                     int num_threads) {
   for (int lvl = static_cast<int>(levels.size()) - 1; lvl >= 0; lvl--) {
@@ -114,33 +146,9 @@ void ApplyComparatorNetworkParallel(std::vector<int> &arr, const std::vector<std
     }
 
     if (num_threads <= 1 || total < num_threads) {
-      for (const auto &[a, b] : comps) {
-        if (arr[a] > arr[b]) {
-          std::swap(arr[a], arr[b]);
-        }
-      }
-      continue;
-    }
-
-    std::vector<std::thread> threads(num_threads);
-    int chunk = total / num_threads;
-    int remainder = total % num_threads;
-
-    int start = 0;
-    for (int t = 0; t < num_threads; t++) {
-      int end = start + chunk + (t < remainder ? 1 : 0);
-      threads[t] = std::thread([&arr, &comps, start, end]() {
-        for (int i = start; i < end; i++) {
-          if (arr[comps[i].first] > arr[comps[i].second]) {
-            std::swap(arr[comps[i].first], arr[comps[i].second]);
-          }
-        }
-      });
-      start = end;
-    }
-
-    for (auto &th : threads) {
-      th.join();
+      ApplyComparatorsSeq(arr, comps);
+    } else {
+      ApplyComparatorsParallel(arr, comps, num_threads);
     }
   }
 }
