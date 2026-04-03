@@ -167,6 +167,27 @@ void SortSingleProcess(std::vector<int> &data, int padded, int n) {
   data.resize(n);
 }
 
+int PadToPowerOfTwo(std::vector<int> &data, int n) {
+  if (n <= 1) {
+    return n;
+  }
+  int padded = 1;
+  while (padded < n) {
+    padded *= 2;
+  }
+  int max_elem = *std::ranges::max_element(data);
+  data.resize(padded, max_elem);
+  return padded;
+}
+
+int ComputeNumTasks(int num_ranks, int padded) {
+  int num_tasks = 1;
+  while (num_tasks * 2 <= num_ranks && num_tasks * 2 <= padded) {
+    num_tasks *= 2;
+  }
+  return num_tasks;
+}
+
 void MergeChunks(std::vector<int> &arr, int chunk_size, int padded) {
   for (int step = chunk_size * 2; step <= padded; step *= 2) {
 #pragma omp parallel for default(none) shared(step, padded, arr)
@@ -219,15 +240,7 @@ bool KarpichIBitwiseBatcherALL::RunImpl() {
 
   if (rank == 0) {
     n = static_cast<int>(data_.size());
-    if (n <= 1) {
-      padded = n;
-    } else {
-      while (padded < n) {
-        padded *= 2;
-      }
-      int max_elem = *std::ranges::max_element(data_);
-      data_.resize(padded, max_elem);
-    }
+    padded = PadToPowerOfTwo(data_, n);
   }
 
   MPI_Bcast(&padded, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -236,10 +249,7 @@ bool KarpichIBitwiseBatcherALL::RunImpl() {
     return true;
   }
 
-  int num_tasks = 1;
-  while (num_tasks * 2 <= num_ranks && num_tasks * 2 <= padded) {
-    num_tasks *= 2;
-  }
+  int num_tasks = ComputeNumTasks(num_ranks, padded);
 
   if (num_tasks == 1) {
     if (rank == 0) {
