@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "karpich_i_bitwise_batcher/common/include/common.hpp"
 #include "task/include/task.hpp"
 

@@ -14,55 +14,59 @@ namespace karpich_i_bitwise_batcher {
 
 namespace {
 
+int FindMaxParallel(const std::vector<int> &arr, int n) {
+  int max_val = arr[0];
+#pragma omp parallel for default(none) shared(arr, n) reduction(max : max_val)
+  for (int i = 1; i < n; i++) {
+    max_val = std::max(max_val, arr[i]);
+  }
+  return max_val;
+}
+
+void CountingPass(std::vector<int> &arr, std::vector<int> &buffer, int n, int shift) {
+  std::vector<int> count(256, 0);
+  int num_threads = omp_get_max_threads();
+  std::vector<std::vector<int>> local_counts(num_threads, std::vector<int>(256, 0));
+
+#pragma omp parallel default(none) shared(arr, shift, local_counts, n)
+  {
+    int tid = omp_get_thread_num();
+#pragma omp for
+    for (int i = 0; i < n; i++) {
+      local_counts[tid][(arr[i] >> shift) & 0xFF]++;
+    }
+  }
+
+  for (int ti = 0; ti < num_threads; ti++) {
+    for (int i = 0; i < 256; i++) {
+      count[i] += local_counts[ti][i];
+    }
+  }
+
+  for (int i = 1; i < 256; i++) {
+    count[i] += count[i - 1];
+  }
+
+  for (int i = n - 1; i >= 0; i--) {
+    buffer[--count[(arr[i] >> shift) & 0xFF]] = arr[i];
+  }
+  arr = buffer;
+}
+
 void RadixSortPositive(std::vector<int> &arr) {
   int n = static_cast<int>(arr.size());
   if (n <= 1) {
     return;
   }
 
-  int max_val = arr[0];
-#pragma omp parallel for reduction(max : max_val)
-  for (int i = 1; i < n; i++) {
-    if (arr[i] > max_val) {
-      max_val = arr[i];
-    }
-  }
-
+  int max_val = FindMaxParallel(arr, n);
   if (max_val == 0) {
     return;
   }
 
   std::vector<int> buffer(n);
-
   for (int shift = 0; shift < 32 && (max_val >> shift) > 0; shift += 8) {
-    std::vector<int> count(256, 0);
-    // Local counts per thread
-    int num_threads = omp_get_max_threads();
-    std::vector<std::vector<int>> local_counts(num_threads, std::vector<int>(256, 0));
-
-#pragma omp parallel default(none) shared(arr, shift, local_counts, n)
-    {
-      int tid = omp_get_thread_num();
-#pragma omp for
-      for (int i = 0; i < n; i++) {
-        local_counts[tid][(arr[i] >> shift) & 0xFF]++;
-      }
-    }
-
-    for (int t = 0; t < num_threads; t++) {
-      for (int i = 0; i < 256; i++) {
-        count[i] += local_counts[t][i];
-      }
-    }
-
-    for (int i = 1; i < 256; i++) {
-      count[i] += count[i - 1];
-    }
-
-    for (int i = n - 1; i >= 0; i--) {
-      buffer[--count[(arr[i] >> shift) & 0xFF]] = arr[i];
-    }
-    arr = buffer;
+    CountingPass(arr, buffer, n, shift);
   }
 }
 
@@ -130,12 +134,14 @@ std::vector<std::vector<std::pair<int, int>>> BuildMergeNetwork(int lo, int hi) 
 
 void ApplyComparatorNetwork(std::vector<int> &arr, const std::vector<std::vector<std::pair<int, int>>> &levels) {
   for (int lvl = static_cast<int>(levels.size()) - 1; lvl >= 0; lvl--) {
-#pragma omp parallel for default(none) shared(arr, levels, lvl)
-    for (int i = 0; i < static_cast<int>(levels[lvl].size()); ++i) {
-      int a = levels[lvl][i].first;
-      int b = levels[lvl][i].second;
-      if (arr[a] > arr[b]) {
-        std::swap(arr[a], arr[b]);
+    const auto &level = levels[lvl];
+    int level_size = static_cast<int>(level.size());
+#pragma omp parallel for default(none) shared(arr, level, level_size)
+    for (int i = 0; i < level_size; ++i) {
+      int aa = level[i].first;
+      int bb = level[i].second;
+      if (arr[aa] > arr[bb]) {
+        std::swap(arr[aa], arr[bb]);
       }
     }
   }
@@ -144,6 +150,30 @@ void ApplyComparatorNetwork(std::vector<int> &arr, const std::vector<std::vector
 void BatcherMerge(std::vector<int> &arr, int lo, int hi) {
   auto levels = BuildMergeNetwork(lo, hi);
   ApplyComparatorNetwork(arr, levels);
+}
+
+void SortSingleProcess(std::vector<int> &data, int padded, int n) {
+  int half = padded / 2;
+  std::vector<int> left(data.begin(), data.begin() + half);
+  std::vector<int> right(data.begin() + half, data.end());
+
+  RadixSort(left);
+  RadixSort(right);
+
+  std::ranges::copy(left, data.begin());
+  std::ranges::copy(right, data.begin() + half);
+
+  BatcherMerge(data, 0, padded - 1);
+  data.resize(n);
+}
+
+void MergeChunks(std::vector<int> &arr, int chunk_size, int padded) {
+  for (int step = chunk_size * 2; step <= padded; step *= 2) {
+#pragma omp parallel for default(none) shared(step, padded, arr)
+    for (int i = 0; i < padded; i += step) {
+      BatcherMerge(arr, i, i + step - 1);
+    }
+  }
 }
 
 }  // namespace
@@ -203,9 +233,6 @@ bool KarpichIBitwiseBatcherALL::RunImpl() {
   MPI_Bcast(&padded, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
   if (padded <= 1) {
-    if (rank == 0) {
-      data_.resize(n);
-    }
     return true;
   }
 
@@ -214,26 +241,14 @@ bool KarpichIBitwiseBatcherALL::RunImpl() {
     num_tasks *= 2;
   }
 
-  // Same logic as seq if num_tasks == 1, but still conceptually distributed
-  if (num_tasks == 1 && rank == 0) {
-    int half = padded / 2;
-    std::vector<int> left(data_.begin(), data_.begin() + half);
-    std::vector<int> right(data_.begin() + half, data_.end());
-
-    RadixSort(left);
-    RadixSort(right);
-
-    std::ranges::copy(left, data_.begin());
-    std::ranges::copy(right, data_.begin() + half);
-
-    BatcherMerge(data_, 0, padded - 1);
-    data_.resize(n);
+  if (num_tasks == 1) {
+    if (rank == 0) {
+      SortSingleProcess(data_, padded, n);
+    }
     return true;
-  } else if (num_tasks == 1) {
-    return true;  // other ranks do nothing
   }
 
-  MPI_Comm active_comm;
+  MPI_Comm active_comm = MPI_COMM_NULL;
   int color = (rank < num_tasks) ? 1 : MPI_UNDEFINED;
   MPI_Comm_split(MPI_COMM_WORLD, color, rank, &active_comm);
 
@@ -248,13 +263,7 @@ bool KarpichIBitwiseBatcherALL::RunImpl() {
     MPI_Gather(local_data.data(), chunk_size, MPI_INT, data_.data(), chunk_size, MPI_INT, 0, active_comm);
 
     if (rank == 0) {
-      auto &arr = data_;
-      for (int step = chunk_size * 2; step <= padded; step *= 2) {
-#pragma omp parallel for default(none) shared(step, padded, arr)
-        for (int i = 0; i < padded; i += step) {
-          BatcherMerge(arr, i, i + step - 1);
-        }
-      }
+      MergeChunks(data_, chunk_size, padded);
       data_.resize(n);
     }
     MPI_Comm_free(&active_comm);
@@ -272,8 +281,8 @@ bool KarpichIBitwiseBatcherALL::PostProcessingImpl() {
         return false;
       }
     }
-    GetOutput() = GetInput();
   }
+  GetOutput() = GetInput();
   return true;
 }
 
